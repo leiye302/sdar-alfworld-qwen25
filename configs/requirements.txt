@@ -1,0 +1,22 @@
+# Linux x86-64, Python 3.12, CUDA 12.8-compatible driver; A100 80GB x4.
+# Native SDAR dependencies are installed afterwards with these constraints.
+torch==2.8.0
+torchvision==0.23.0
+torchaudio==2.8.0
+vllm==0.11.0
+transformers==4.57.3
+ray[default]==2.50.0
+tensordict==0.8.3
+torchdata==0.11.0
+hydra-core==1.3.2
+omegaconf==2.3.0
+numpy==2.2.6
+pandas==2.2.3
+pyarrow==19.0.1
+matplotlib==3.10.7
+alfworld==0.4.2
+textworld==1.6.2
+gymnasium==0.29.1
+stable-baselines3==2.6.0
+huggingface-hub==0.36.0
+pytest==8.3.5
