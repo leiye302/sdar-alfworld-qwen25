@@ -11,7 +11,8 @@ from common import ROOT, UPSTREAM, atomic_json, load, sha, tasks
 
 def git(path, *args):
     return subprocess.run(['git', '-c', 'core.autocrlf=false', '-C', str(path), *args],
-                          check=True, capture_output=True, text=True).stdout.strip()
+                          check=True, capture_output=True, text=True,
+                          encoding='utf-8', errors='replace').stdout.strip()
 
 
 def verify():
