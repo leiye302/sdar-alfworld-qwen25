@@ -1,4 +1,4 @@
-"""Four-GPU native SDAR launcher for either public Qwen2.5 backbone."""
+"""Eight-GPU native SDAR launcher for either public Qwen2.5 backbone."""
 import argparse
 import contextlib
 import json
@@ -7,7 +7,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
-from common import ROOT, UPSTREAM, atomic_json, checkpoint_complete, devices, load, sha, tasks
+from common import ROOT, UPSTREAM, WORLD_SIZE, atomic_json, checkpoint_complete, devices, load, sha, tasks
 from setup import verify
 
 
@@ -15,7 +15,7 @@ def base_model(size):
     return ROOT / 'models' / load('models.json')[size]['model_id'].split('/')[-1]
 
 
-def config(size, model, assets, run_dir, cpus=32, evaluate=False):
+def config(size, model, assets, run_dir, cpus=64, evaluate=False):
     from hydra import compose, initialize_config_dir
     from omegaconf import OmegaConf
     with initialize_config_dir(config_dir=str(UPSTREAM / 'verl/trainer/config'), version_base=None):
@@ -33,8 +33,9 @@ def config(size, model, assets, run_dir, cpus=32, evaluate=False):
         'trainer.validation_data_dir': str(run_dir / 'validation_native'),
         'trainer.rollout_data_dir': str(run_dir / 'rollouts'),
         'trainer.val_only': evaluate,
-        'ray_init.address': 'local', 'ray_init.num_gpus': 4,
+        'ray_init.address': 'local', 'ray_init.num_gpus': WORLD_SIZE,
         'ray_init.num_cpus': cpus, 'ray_init.include_dashboard': False,
+        'ray_init._temp_dir': None,
         'ray_init.object_store_memory': 2 * 1024**3,
         'ray_init.runtime_env.env_vars.PYTHONPATH': os.pathsep.join([str(ROOT / 'src'), str(UPSTREAM)]),
         'ray_init.runtime_env.env_vars.ALFWORLD_DATA': str(assets),
@@ -104,7 +105,7 @@ def launch(args):
                'recipe_sha256': sha(ROOT / 'configs/experiment.json'),
                'upstream_lock_sha256': sha(ROOT / 'configs/upstream.json'),
                'task_manifest_sha256': sha(ROOT / 'configs/seen140_tasks.json'),
-               'world_size': 4, 'command': args.command}
+               'world_size': WORLD_SIZE, 'command': args.command}
     if args.resume:
         if args.command != 'train' or json.loads((run_dir / 'binding.json').read_text()) != binding:
             raise RuntimeError('Resume binding differs from the original run')
@@ -119,12 +120,12 @@ def launch(args):
         data(run_dir)
     with run_lock(run_dir):
         import torch
-        if torch.cuda.device_count() != 4:
-            raise RuntimeError('Four allocated CUDA devices are required')
-        for index in range(4):
+        if torch.cuda.device_count() != WORLD_SIZE:
+            raise RuntimeError('Eight allocated CUDA devices are required')
+        for index in range(WORLD_SIZE):
             props = torch.cuda.get_device_properties(index)
             if props.total_memory < 70 * 1024**3:
-                raise RuntimeError('This recipe targets four A100 80GB GPUs')
+                raise RuntimeError('This recipe targets eight A100 80GB GPUs')
         runtime = Path(tempfile.mkdtemp(prefix='sd-', dir=os.environ.get('SDAR_RUNTIME_ROOT')))
         cfg.ray_init._temp_dir = str(runtime)
         from omegaconf import OmegaConf
@@ -161,8 +162,8 @@ def main():
     parser.add_argument('command', choices=['train', 'eval', 'export'])
     parser.add_argument('--size', choices=['1.5b', '3b'], required=True)
     parser.add_argument('--assets', type=Path, default=Path(os.environ.get('ALFWORLD_DATA', ROOT / 'data/alfworld')))
-    parser.add_argument('--gpus', default=os.environ.get('SDAR_GPUS', '0,1,2,3'))
-    parser.add_argument('--cpus', type=int, default=int(os.environ.get('SDAR_CPUS', '32')))
+    parser.add_argument('--gpus', default=os.environ.get('SDAR_GPUS', '0,1,2,3,4,5,6,7'))
+    parser.add_argument('--cpus', type=int, default=int(os.environ.get('SDAR_CPUS', '64')))
     parser.add_argument('--run-dir', type=Path)
     parser.add_argument('--model', type=Path, help='Exported HF directory, evaluation only')
     parser.add_argument('--resume', action='store_true')

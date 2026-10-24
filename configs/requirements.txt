@@ -1,4 +1,4 @@
-# Linux x86-64, Python 3.12, CUDA 12.8-compatible driver; A100 80GB x4.
+# Linux x86-64, Python 3.12, CUDA 12.8-compatible driver; A100 80GB x8.
 # Native SDAR dependencies are installed afterwards with these constraints.
 torch==2.8.0
 torchvision==0.23.0

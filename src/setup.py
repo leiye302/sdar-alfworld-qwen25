@@ -19,6 +19,11 @@ def verify():
     lock = load('upstream.json')
     if git(UPSTREAM, 'rev-parse', 'HEAD') != lock['commit']:
         raise RuntimeError('SDAR source revision differs')
+    tracked_changes = set(git(UPSTREAM, 'diff', '--name-only', 'HEAD', '--').splitlines())
+    allowed_changes = {name for name in lock['patched_files']
+                       if name != 'agent_system/environments/env_package/alfworld/fixed_validation.py'}
+    if tracked_changes != allowed_changes:
+        raise RuntimeError('Unexpected native source changes: ' + ', '.join(sorted(tracked_changes ^ allowed_changes)))
     patch = ROOT / 'patches/runtime.patch'
     if sha(patch) != lock['patch_sha256']:
         raise RuntimeError('Runtime patch differs')
@@ -29,6 +34,9 @@ def verify():
     for name, expected in lock['patched_files'].items():
         if hashlib.sha256((UPSTREAM / name).read_bytes().replace(b'\r\n', b'\n')).hexdigest() != expected:
             raise RuntimeError('Runtime adapter differs: ' + name)
+    if sha(ROOT / 'src/fixed_validation.py') != lock['patched_files'][
+            'agent_system/environments/env_package/alfworld/fixed_validation.py']:
+        raise RuntimeError('Fixed validation source copy differs')
     if sha(ROOT / 'configs/seen140_tasks.json') != lock['seen140_sha256']:
         raise RuntimeError('Fixed validation task manifest differs')
     tasks()

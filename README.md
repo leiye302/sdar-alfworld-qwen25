@@ -1,6 +1,8 @@
-# SDAR on ALFWorld: Qwen2.5-1.5B / 3B, 4×A100 80GB
+# SDAR on ALFWorld: Qwen2.5-1.5B / 3B, 8×A100 80GB
 
-独立运行 [SDAR: Self-Distilled Agentic Reinforcement Learning](https://arxiv.org/abs/2605.15155) 的 ALFWorld 对比实验。直接复用 [官方代码](https://github.com/ZJU-REAL/SDAR)，锁定 `29dcb12a55d8fc17ba6ae03fd0a69048f43051f3`。**两个尺寸分别从原始 Instruct 基模开始，各训练150 updates；每个实验使用完整四卡，默认顺序运行。**
+独立运行 [SDAR: Self-Distilled Agentic Reinforcement Learning](https://arxiv.org/abs/2605.15155) 的 ALFWorld 对比实验。直接复用 [官方代码](https://github.com/ZJU-REAL/SDAR)，锁定 `29dcb12a55d8fc17ba6ae03fd0a69048f43051f3`。**两个尺寸分别从原始 Instruct 基模开始，各训练150 updates；每个实验使用完整八卡，默认先1.5B、再3B顺序运行。**
+
+本版本面向 **8×A100 80GB**，恢复官方八卡、rollout TP=2、vLLM显存比例0.6、CUDA graph和原生非fused forward。不是把四卡的全局batch翻倍，也不是两个尺寸各四卡同时运行。较早的四卡版本不能直接用八卡配置续训；见第6节。
 
 | 实验 | 初始化 | 训练 |
 | --- | --- | --- |
@@ -37,9 +39,9 @@ $$
 
 两种尺寸共用 [experiment.json](configs/experiment.json)，除模型 ID / revision、实验名称和输出路径外不改变配方。模型版本记录在 [models.json](configs/models.json)。
 
-## 2. 四卡服务器准备
+## 2. 八卡服务器准备
 
-要求 Linux x86-64、Python3.12、4×A100 **80GB**、兼容CUDA12.8的驱动。建议32个可用逻辑CPU、192–256GiB主机内存、250–300GiB空闲磁盘。磁盘包含两个尺寸各最近两份可续训断点、公开基模、环境、缓存及最终导出；这是部署预算，不是实测最小值。没有这台服务器的登录信息，本仓库不远程自动占卡。
+要求 Linux x86-64、Python3.12、8×A100 **80GB**、兼容CUDA12.8的驱动。建议64个可用逻辑CPU、256–512GiB主机内存、至少300GiB空闲磁盘，400GiB更稳。磁盘包含两个尺寸各最近两份可续训断点、公开基模、环境、缓存及最终导出和第三份存盘峰值；这是部署预算，不是实测最小值。A100 40GB不属于本配方已配置的硬件；本仓库不远程自动占卡。
 
 ```bash
 git clone https://github.com/leiye302/sdar-alfworld-qwen25.git
@@ -58,7 +60,7 @@ python -m pip install -e .deps/sdar -c configs/requirements.txt
 python -m pip check
 
 cp .env.example .env
-# 编辑获配的四个 GPU 编号、CPU 数量和 ALFWORLD_DATA。
+# 编辑获配的八个 GPU 编号、CPU 数量和 ALFWORLD_DATA。
 set -a
 source .env
 set +a
@@ -68,6 +70,7 @@ python src/setup.py --download-model both
 # 官方下载器读取 ALFWORLD_DATA。准备 json_2.1.1 和 logic；无需重新采集轨迹。
 alfworld-download
 python src/setup.py --verify
+python scripts/check_release.py
 python -m pytest tests -q
 ```
 
@@ -84,10 +87,10 @@ bash scripts/train.sh --size 1.5b --dry-run
 bash scripts/train.sh --size 3b --dry-run
 ```
 
-刷新 GPU 实时占用，确认四卡归自己使用。在 `tmux` / 作业调度器中执行：
+刷新 GPU 实时占用，确认八卡归自己使用。在 `tmux` / 作业调度器中执行：
 
 ```bash
-# 1.5B150 → 导出；随后3B150 → 导出。每个实验都使用SDAR_GPUS指定的四张卡。
+# 1.5B150 → 导出；随后3B150 → 导出。每个实验都使用SDAR_GPUS指定的八张卡。
 bash scripts/run_both.sh
 ```
 
@@ -98,9 +101,9 @@ bash scripts/train.sh --size 1.5b
 bash scripts/train.sh --size 3b
 ```
 
-**四卡机器不要同时执行上面两条命令。** 默认不是每个尺寸只用两卡；没有外层 `torchrun`，由 SDAR/Ray 启动四个 FSDP / vLLM worker。每个实验的 Ray 使用独立短路径临时目录和 `address=local`；不连接其他实验的集群，也不要执行整机 `ray stop`。每个运行目录有进程锁，防止重复提交同一输出。
+**不要在同一组八张卡上同时执行上面两条命令。** 没有外层 `torchrun`：由SDAR/Ray启动八个FSDP rank，rollout为四个TP=2副本。八卡共同消费每update的128条episode，不是每卡128条。每个实验的Ray使用独立短路径临时目录和 `address=local`；不连接其他实验的集群，也不要执行整机 `ray stop`。每个运行目录有进程锁，防止重复提交同一输出。
 
-第一次真实运行应检查：四个GPU worker、环境rollout、非空奖励、Teacher gap和gate、有限grad norm、Actor backward/update及一次完整存盘。仓库中的CPU测试不能替代这一检查。
+第一次真实运行应检查：八个rank、TP=2的rollout、环境交互、非空奖励、Teacher gap和gate、有限grad norm、Actor backward/update及一次完整存盘。仓库中的CPU测试不能替代这一检查。不要因初期success为0或gate变化就改方法；若遇到OOM，先保留日志并核对实际模型、GPU显存和resolved_config，任何内存配置变更均须记录，不能悄悄改变global batch、group size、loss或技能来源。
 
 ## 4. 评测协议与主实验比较
 
@@ -135,7 +138,7 @@ runs/sdar_1.5b/                         # 3B 对应 sdar_3b
 python src/run.py export --size 1.5b
 bash scripts/eval.sh --size 1.5b --model "$PWD/runs/sdar_1.5b/hf150" \
   --run-dir "$PWD/runs/sdar_1.5b_final_eval"
-# 3B替换size和模型/输出目录；同样使用四张已空闲的GPU。
+# 3B替换size和模型/输出目录；同样使用八张已空闲的GPU。
 python src/report.py
 ```
 
@@ -150,7 +153,9 @@ bash scripts/train.sh --size 1.5b --resume
 # 或 --size 3b --resume
 ```
 
-使用官方原生续训机制，保存权重、optimizer、scheduler、rank RNG和dataloader；启动前检查全部四rank文件及模型/配方绑定。该机制**不保存每个TextWorld环境的游戏迭代器**，所以不保证中断续跑与不中断训练逐位相同。若首个20步断点尚未完成，不能把残缺目录当作完整断点恢复。默认新训练拒绝覆盖已有输出。
+使用官方原生续训机制，保存权重、optimizer、scheduler、rank RNG和dataloader；启动前检查全部八rank文件及模型/配方绑定。该机制**不保存每个TextWorld环境的游戏迭代器**，所以不保证中断续跑与不中断训练逐位相同。若首个20步断点尚未完成，不能把残缺目录当作完整断点恢复。默认新训练拒绝覆盖已有输出。
+
+两尺寸顺序运行中断时，先用上面的单尺寸命令恢复尚未完成的训练，再运行该尺寸的export；下一尺寸用独立train命令启动。`run_both.sh`是首次执行队列，不会覆盖已有输出或自动把失败任务从0重跑。
 
 ## 6. 与官方8卡脚本的差异
 
@@ -159,17 +164,19 @@ bash scripts/train.sh --size 1.5b --resume
 | 项目 | 官方3B脚本 | 本对比入口 |
 | --- | --- | --- |
 | Backbone | Qwen2.5-3B-Instruct | 同3B，另加官方1.5B |
-| GPU / rollout TP | 8卡 / TP2 | 4卡 / TP1，每种尺寸相同 |
-| vLLM显存 / cache | 0.6 / 不释放 | 0.3 / 释放，eager；与主实验四卡部署一致 |
-| Log-prob计算 | 普通forward | 官方已支持的fused torch后端，减少完整logits显存 |
+| GPU / rollout TP | 8卡 / TP2 | 相同；每种尺寸都用八卡 |
+| vLLM显存 / cache / graph | 0.6 / 不释放 / graph开启 | 相同 |
+| Log-prob计算 | 普通forward | 相同，use_fused_kernels=false |
 | 环境进程 | 每环境一个Ray actor | 每16个独立原生环境共用一个actor，环境数/seed/结果顺序不变 |
 | 验证 | 128条、每5步 | 固定seen140、每10步，与主实验一致 |
 | 存盘 / 日志 | save=-1；console+wandb | 每20步及150、最近两份；console+本地JSON |
 
 `patches/runtime.patch` 只改环境调度/固定验证及trainer导入，另复制一个固定任务选择助手。**不把RETHINK方法的大补丁带进SDAR。** 启动时逐一核验未修改的核心文件和修改过的运行文件，防止误用旧本地实验代码。
 
+独立配置只覆盖模型、资源、固定评测、日志和存盘等字段；单独测试将关键算法/rollout字段逐项对照锁定的官方3B启动脚本。完整适配清单和首轮验收见 [docs/REPRODUCTION.md](docs/REPRODUCTION.md)。此前四卡版本的recipe/world-size绑定与本版不同，禁止将四卡断点冒充本版八卡续训断点；如需迁移应单独制定并验证重分片流程，本仓库不隐式执行。
+
 ## 7. 验证范围与许可
 
-测试覆盖干净源码准备、两种尺寸配置、四卡分配、固定任务/版本拒绝、分组环境seed和返回顺序、完整断点检查、以及官方SDAR loss的Teacher依赖与detach梯度。GitHub Actions在全新Linux检出上执行这些检查。**本仓库不附带训后成绩；A100的CUDA/NCCL/vLLM训练尚需运行者进行真实首轮确认。**
+测试覆盖干净源码准备、两种尺寸配置、八卡分配、官方启动脚本逐字段对照、固定任务/版本拒绝、分组环境seed和返回顺序、完整八rank断点检查、以及官方SDAR loss的Teacher依赖与detach梯度。GitHub Actions在全新Linux检出上执行这些检查。**本仓库不附带训后成绩；A100的CUDA/NCCL/vLLM训练尚需运行者进行真实首轮确认。**
 
 包装代码与SDAR源码采用Apache-2.0，保留第三方声明。**Qwen2.5-1.5B-Instruct是Apache-2.0；Qwen2.5-3B-Instruct采用Qwen Research License**，不能把3B权重一概称为Apache许可。ALFWorld资源遵循其来源许可。详见 [THIRD_PARTY.md](THIRD_PARTY.md)。

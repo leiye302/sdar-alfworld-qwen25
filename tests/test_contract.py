@@ -1,6 +1,7 @@
 import ast
 import copy
 import json
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -9,7 +10,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'src'))
-from common import checkpoint_complete, devices, load, protocol, tasks
+from common import WORLD_SIZE, checkpoint_complete, devices, load, protocol, tasks
 from fixed_validation import fixed_validation_envs
 from run import config
 from setup import verify
@@ -25,7 +26,12 @@ def test_native_source_and_task_locks():
 @pytest.mark.parametrize('size', ['1.5b', '3b'])
 def test_composed_native_recipe(size, tmp_path):
     cfg = config(size, tmp_path/'model', tmp_path/'assets', tmp_path/'run')
-    assert (cfg.trainer.n_gpus_per_node, cfg.ray_init.num_gpus) == (4, 4)
+    assert (cfg.trainer.n_gpus_per_node, cfg.ray_init.num_gpus) == (8, 8)
+    assert cfg.actor_rollout_ref.rollout.tensor_model_parallel_size == 2
+    assert cfg.actor_rollout_ref.rollout.gpu_memory_utilization == 0.6
+    assert not cfg.actor_rollout_ref.rollout.enforce_eager
+    assert not cfg.actor_rollout_ref.rollout.free_cache_engine
+    assert not cfg.actor_rollout_ref.model.use_fused_kernels
     assert cfg.algorithm.sdar.gate_beta == 5 and cfg.algorithm.sdar.sdar_coef == 0.01
     assert cfg.data.train_batch_size == 16 and cfg.env.rollout.n == 8
     assert cfg.actor_rollout_ref.actor.ppo_mini_batch_size == 256
@@ -41,22 +47,24 @@ def test_composed_native_recipe(size, tmp_path):
     assert cfg.actor_rollout_ref.model.get('lora_rank', 0) == 0
 
 
-@pytest.mark.parametrize('spec', ['0,1', '0,1,2,2', '0,1,2,3,4', '', '0,1,2,GPU-xxx'])
+@pytest.mark.parametrize('spec', ['0,1', '0,1,2,3', '0,1,2,3,4,5,6,6', '0,1,2,3,4,5,6,7,8', '',
+                                 '0,1,2,3,4,5,6,GPU-xxx'])
 def test_invalid_gpu_allocation(spec):
     with pytest.raises(ValueError):
         devices(spec)
 
 
-def test_four_gpu_allocation():
-    assert devices('4,5,6,7') == ['4', '5', '6', '7']
+def test_eight_gpu_allocation():
+    assert devices('0,1,2,3,4,5,6,7') == [str(i) for i in range(8)]
+    assert devices('8,9,10,11,12,13,14,15') == [str(i) for i in range(8, 16)]
 
 
 def test_partial_checkpoint_rejected(tmp_path):
     with pytest.raises(RuntimeError):
         checkpoint_complete(tmp_path)
-    for rank in range(4):
+    for rank in range(WORLD_SIZE):
         for kind in ('model', 'optim', 'extra_state'):
-            path = tmp_path / 'actor' / f'{kind}_world_size_4_rank_{rank}.pt'
+            path = tmp_path / 'actor' / f'{kind}_world_size_{WORLD_SIZE}_rank_{rank}.pt'
             path.parent.mkdir(exist_ok=True)
             path.write_bytes(b'unit-test')
     (tmp_path/'actor/config.json').write_text('{}')
@@ -174,6 +182,89 @@ def test_models_share_all_scientific_settings(tmp_path):
         cfg.trainer.default_local_dir = cfg.trainer.validation_data_dir = cfg.trainer.rollout_data_dir = 'output'
         cfg.ray_init.runtime_env.env_vars.SDAR_RUN_DIR = 'output'
     assert OmegaConf.to_container(left, resolve=True) == OmegaConf.to_container(right, resolve=True)
+
+
+def test_scientific_and_eight_gpu_settings_match_official_3b_launcher(tmp_path):
+    """The port changes model/output/eval bookkeeping, not native training fields."""
+    from omegaconf import OmegaConf
+    source = (ROOT/'.deps/sdar/examples/sdar_trainer/run_alfworld_3b.sh').read_text()
+    assignments = dict(re.findall(r'(?m)^\s*\+?([\w.]+)=([^\s\\]+)', source))
+    cfg = config('3b', tmp_path/'model', tmp_path/'assets', tmp_path/'run')
+    keys = [
+        'algorithm.adv_estimator', 'data.train_batch_size', 'data.max_prompt_length',
+        'data.max_response_length', 'data.filter_overlong_prompts', 'data.truncation',
+        'data.return_raw_chat', 'actor_rollout_ref.actor.optim.lr',
+        'actor_rollout_ref.model.use_remove_padding',
+        'actor_rollout_ref.actor.ppo_mini_batch_size',
+        'actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu',
+        'actor_rollout_ref.actor.use_kl_loss', 'actor_rollout_ref.actor.kl_loss_coef',
+        'actor_rollout_ref.actor.kl_loss_type',
+        'actor_rollout_ref.model.enable_gradient_checkpointing',
+        'actor_rollout_ref.actor.fsdp_config.param_offload',
+        'actor_rollout_ref.actor.fsdp_config.optimizer_offload',
+        'actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu',
+        'actor_rollout_ref.rollout.tensor_model_parallel_size',
+        'actor_rollout_ref.rollout.gpu_memory_utilization',
+        'actor_rollout_ref.rollout.enable_chunked_prefill',
+        'actor_rollout_ref.rollout.enforce_eager',
+        'actor_rollout_ref.rollout.free_cache_engine',
+        'actor_rollout_ref.rollout.val_kwargs.temperature',
+        'actor_rollout_ref.rollout.val_kwargs.do_sample',
+        'actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu',
+        'actor_rollout_ref.ref.fsdp_config.param_offload',
+        'actor_rollout_ref.actor.use_invalid_action_penalty',
+        'actor_rollout_ref.actor.invalid_action_penalty_coef',
+        'algorithm.use_kl_in_reward', 'algorithm.sdar.sdar_coef',
+        'algorithm.sdar.gate_beta', 'algorithm.sdar.skill_all',
+        'env.env_name', 'env.seed', 'env.max_steps', 'env.rollout.n',
+        'trainer.critic_warmup', 'trainer.n_gpus_per_node',
+        'trainer.ray_wait_register_center_timeout', 'trainer.nnodes',
+        'trainer.total_epochs', 'trainer.val_before_train',
+    ]
+    for key in keys:
+        raw = assignments[key]
+        if raw.startswith('$'):
+            raw = assignments[raw[1:]]
+        if raw.lower() in ('true', 'false'):
+            expected = raw.lower() == 'true'
+        elif raw.startswith("'"):
+            expected = raw.strip("'")
+        else:
+            try:
+                expected = float(raw)
+            except ValueError:
+                expected = raw
+        assert OmegaConf.select(cfg, key) == expected, key
+
+
+def test_four_rank_checkpoint_is_not_an_eight_rank_resume(tmp_path):
+    for rank in range(4):
+        for kind in ('model', 'optim', 'extra_state'):
+            path = tmp_path/'actor'/f'{kind}_world_size_4_rank_{rank}.pt'
+            path.parent.mkdir(exist_ok=True)
+            path.write_bytes(b'unit-test')
+    (tmp_path/'actor/config.json').write_text('{}')
+    (tmp_path/'data.pt').write_bytes(b'unit-test')
+    with pytest.raises(RuntimeError, match='Incomplete resumable checkpoint'):
+        checkpoint_complete(tmp_path)
+
+
+def test_validation_rollout_uses_native_padding_then_unpadding():
+    source = (ROOT/'.deps/sdar/agent_system/multi_turn_rollout/rollout_loop.py').read_text()
+    assert 'pad_dataproto_to_divisor(batch_input, actor_rollout_wg.world_size)' in source
+    assert 'unpad_dataproto(batch_output_padded, pad_size=pad_size)' in source
+
+
+def test_runtime_directory_config_can_be_set_before_ray_start(tmp_path):
+    cfg = config('1.5b', tmp_path/'model', tmp_path/'assets', tmp_path/'run')
+    cfg.ray_init._temp_dir = str(tmp_path/'ray')
+    assert cfg.ray_init._temp_dir == str(tmp_path/'ray')
+
+
+def test_release_allowlist_and_privacy():
+    result = subprocess.run([sys.executable, str(ROOT/'scripts/check_release.py')],
+                            text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
 
 
 def test_evaluation_hook_preserves_native_success_and_all_tasks(tmp_path, monkeypatch):
