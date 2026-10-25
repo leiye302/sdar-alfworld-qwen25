@@ -167,7 +167,7 @@ bash scripts/train.sh --size 1.5b --resume
 | GPU / rollout TP | 8卡 / TP2 | 相同；每种尺寸都用八卡 |
 | vLLM显存 / cache / graph | 0.6 / 不释放 / graph开启 | 相同 |
 | Log-prob计算 | 普通forward | 相同，use_fused_kernels=false |
-| 环境进程 | 每环境一个Ray actor | 每16个独立原生环境共用一个actor，环境数/seed/结果顺序不变 |
+| 环境进程 | 每环境一个Ray actor | 沿用每环境一个Ray actor，不再添加串行环境分组 |
 | 验证 | 128条、每5步 | 固定seen140、每10步，与主实验一致 |
 | 存盘 / 日志 | save=-1；console+wandb | 每20步及150、最近两份；console+本地JSON |
 
@@ -177,6 +177,12 @@ bash scripts/train.sh --size 1.5b --resume
 
 ## 7. 验证范围与许可
 
-测试覆盖干净源码准备、两种尺寸配置、八卡分配、官方启动脚本逐字段对照、固定任务/版本拒绝、分组环境seed和返回顺序、完整八rank断点检查、以及官方SDAR loss的Teacher依赖与detach梯度。GitHub Actions在全新Linux检出上执行这些检查。**本仓库不附带训后成绩；A100的CUDA/NCCL/vLLM训练尚需运行者进行真实首轮确认。**
+测试覆盖干净源码准备、两种尺寸配置、八卡分配、官方启动脚本逐字段对照、固定任务/版本拒绝、原生环境seed和返回顺序、完整八rank断点检查、以及官方SDAR loss的Teacher依赖与detach梯度。GitHub Actions在全新Linux检出上执行这些检查。**本仓库不附带训后成绩；A100的CUDA/NCCL/vLLM训练尚需运行者进行真实首轮确认。**
 
 包装代码与SDAR源码采用Apache-2.0，保留第三方声明。**Qwen2.5-1.5B-Instruct是Apache-2.0；Qwen2.5-3B-Instruct采用Qwen Research License**，不能把3B权重一概称为Apache许可。ALFWorld资源遵循其来源许可。详见 [THIRD_PARTY.md](THIRD_PARTY.md)。
+
+## 2026-10-26 执行设置更正
+
+撤回额外添加的串行环境分组，恢复官方每环境一个 Ray actor、每 actor 0.1 CPU。模型尺寸、获配卡数、训练量、loss、固定 seen140、验证频率和已约定的断点规则不变。未改写上游 rollout、Teacher 或优化器。
+
+已有 checkout 的旧 `.deps/sdar` 仍带旧补丁：在训练停止并保留断点后，将它改名备份，再运行 `python src/setup.py --framework`；或在新的目录重新克隆。不要删除 `runs/`，也不要在运行中的任务里替换依赖。旧配方与新配方的绑定 SHA 不同，禁止绕过恢复校验直接续跑。此更正通过 CPU/干净检出检查不等于已完成 A100 CUDA/NCCL/vLLM 实测。
